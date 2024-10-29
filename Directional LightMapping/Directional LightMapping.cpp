@@ -102,6 +102,10 @@ const char* fragmentShaderSource = R"(
 
     uniform bool renderLightmapOnly;
 
+    uniform float bumpStrength;
+    uniform float specularIntensity;
+    uniform float shininess;
+
     void main()
     {
         if (renderLightmapOnly) {
@@ -110,39 +114,75 @@ const char* fragmentShaderSource = R"(
             return;
         }
 
-        // Normal Mapping
+        // Normal Mapping with Bump Strength Control
         vec3 tangentNormal = texture(normalMap, TexCoords).rgb;
         tangentNormal.g = 1.0 - tangentNormal.g; // Flip Y for DirectX to OpenGL conversion
-        tangentNormal = normalize(tangentNormal * 2.0 - 1.0);
+        tangentNormal = tangentNormal * 2.0 - 1.0; // Convert to [-1, 1] range
+
+        vec3 defaultNormal = vec3(0.0, 0.0, 1.0); // Default normal in tangent space
+
+        // Blend between default normal and normal map normal
+        tangentNormal = normalize(mix(defaultNormal, tangentNormal, bumpStrength));
         vec3 N = normalize(TBN * tangentNormal);
 
-        // View Vector
+        // --- View Vector ---
         vec3 V = normalize(viewPos - FragPos);
 
-        // Reflection Vector
+        // --- Reflection Vector for Environment Map ---
         vec3 R = reflect(-V, N);
-
-        // Sample Environment Map (Cubemap)
         vec3 reflectionColor = texture(environmentMap, R).rgb;
 
-        // Sample RNM lightmaps for diffuse lighting
+        // --- Sample RNM Lightmaps ---
         vec3 lm0 = texture(lightmap0, LightmapTexCoords).rgb;
         vec3 lm1 = texture(lightmap1, LightmapTexCoords).rgb;
         vec3 lm2 = texture(lightmap2, LightmapTexCoords).rgb;
 
-        float l0 = max(tangentNormal.x, 0.0);
-        float l1 = max(tangentNormal.y, 0.0);
-        float l2 = max(tangentNormal.z, 0.0);
+        // --- Compute Luminance of Each Lightmap Sample ---
+        float lum0 = dot(lm0, vec3(0.2126, 0.7152, 0.0722));
+        float lum1 = dot(lm1, vec3(0.2126, 0.7152, 0.0722));
+        float lum2 = dot(lm2, vec3(0.2126, 0.7152, 0.0722));
+
+        // --- Extract Basis Vectors from TBN Matrix ---
+        vec3 basis0 = normalize(TBN[0]); // Tangent
+        vec3 basis1 = normalize(TBN[1]); // Bitangent
+        vec3 basis2 = normalize(TBN[2]); // Normal
+
+        // --- Compute Dominant Light Direction ---
+        vec3 dominantDir = lum0 * basis0 + lum1 * basis1 + lum2 * basis2;
+        dominantDir = normalize(dominantDir);
+
+        // --- Diffuse Lighting Calculation ---
+        float l0 = max(dot(N, basis0), 0.0);
+        float l1 = max(dot(N, basis1), 0.0);
+        float l2 = max(dot(N, basis2), 0.0);
 
         vec3 diffuseLighting = lm0 * l0 + lm1 * l1 + lm2 * l2;
 
-        // Fetch diffuse color
+        // --- Fetch Diffuse Color ---
         vec3 albedo = texture(diffuseTexture, TexCoords).rgb;
 
-        // Combine Diffuse and Reflection
+        // --- Calculate Diffuse Component ---
         vec3 diffuse = albedo * diffuseLighting;
-        float reflectionIntensity = 0.25; // Adjust between 0.0 and 1.0
-        vec3 finalColor = diffuse + reflectionColor * reflectionIntensity;
+
+        // --- Specular Lighting Calculation ---
+        // Blinn-Phong Specular Model
+        vec3 H = normalize(V + dominantDir);
+        float NdotH = max(dot(N, H), 0.0);
+        float specularFactor = pow(NdotH, shininess);
+
+        // Compute irradiance in dominant direction for specular
+        float s0 = max(dot(dominantDir, basis0), 0.0);
+        float s1 = max(dot(dominantDir, basis1), 0.0);
+        float s2 = max(dot(dominantDir, basis2), 0.0);
+
+        vec3 lightColor = lm0 * s0 + lm1 * s1 + lm2 * s2;
+
+        // Calculate Specular Component
+        vec3 specular = lightColor * specularFactor * specularIntensity;
+
+        // --- Combine Diffuse, Specular, and Reflection ---
+        float reflectionIntensity = 0.1; // Adjust between 0.0 and 1.0
+        vec3 finalColor = diffuse + specular + reflectionColor * reflectionIntensity;
 
         FragColor = vec4(finalColor, 1.0);
     }
@@ -163,7 +203,13 @@ const char* hl2FragmentShaderSource = R"(
     uniform sampler2D lightmap1;
     uniform sampler2D lightmap2;
 
+    uniform vec3 viewPos;
+
     uniform bool renderLightmapOnly;
+
+    uniform float bumpStrength;
+    uniform float specularIntensity;
+    uniform float shininess;
 
     void main()
     {
@@ -173,29 +219,75 @@ const char* hl2FragmentShaderSource = R"(
             return;
         }
 
-        // Normal Mapping
+        // Normal Mapping with Bump Strength Control
         vec3 tangentNormal = texture(normalMap, TexCoords).rgb;
         tangentNormal.g = 1.0 - tangentNormal.g; // Flip Y for DirectX to OpenGL conversion
-        tangentNormal = normalize(tangentNormal * 2.0 - 1.0);
+        tangentNormal = tangentNormal * 2.0 - 1.0; // Convert to [-1, 1] range
+
+        vec3 defaultNormal = vec3(0.0, 0.0, 1.0); // Default normal in tangent space
+
+        // Blend between default normal and normal map normal
+        tangentNormal = normalize(mix(defaultNormal, tangentNormal, bumpStrength));
+
+        // Transform normal to world space
         vec3 N = normalize(TBN * tangentNormal);
 
-        // Sample RNM lightmaps for diffuse lighting
+        // View Vector
+        vec3 V = normalize(viewPos - FragPos);
+
+        // Sample lightmaps
         vec3 lm0 = texture(lightmap0, LightmapTexCoords).rgb;
         vec3 lm1 = texture(lightmap1, LightmapTexCoords).rgb;
         vec3 lm2 = texture(lightmap2, LightmapTexCoords).rgb;
 
-        // Combine the lightmaps using the normal components
-        float l0 = N.x * 0.5 + 0.5;
-        float l1 = N.y * 0.5 + 0.5;
-        float l2 = N.z * 0.5 + 0.5;
+        // Compute luminance of each lightmap (using standard luminance coefficients)
+        float lum0 = dot(lm0, vec3(0.2126, 0.7152, 0.0722));
+        float lum1 = dot(lm1, vec3(0.2126, 0.7152, 0.0722));
+        float lum2 = dot(lm2, vec3(0.2126, 0.7152, 0.0722));
+
+        // Get basis vectors from TBN matrix
+        vec3 basis0 = normalize(TBN[0]); // Tangent
+        vec3 basis1 = normalize(TBN[1]); // Bitangent
+        vec3 basis2 = normalize(TBN[2]); // Normal
+
+        // Compute dominant light direction
+        vec3 dominantDir = lum0 * basis0 + lum1 * basis1 + lum2 * basis2;
+        dominantDir = normalize(dominantDir);
+
+        // Light direction
+        vec3 L = dominantDir;
+
+        // --- Diffuse Lighting Calculation ---
+        float l0 = max(dot(N, basis0), 0.0);
+        float l1 = max(dot(N, basis1), 0.0);
+        float l2 = max(dot(N, basis2), 0.0);
 
         vec3 diffuseLighting = lm0 * l0 + lm1 * l1 + lm2 * l2;
 
         // Fetch diffuse color
         vec3 albedo = texture(diffuseTexture, TexCoords).rgb;
 
+        // Calculate Diffuse Component
+        vec3 diffuse = albedo * diffuseLighting;
+
+        // --- Specular Lighting Calculation ---
+        // Blinn-Phong Specular
+        vec3 H = normalize(V + L);
+        float NdotH = max(dot(N, H), 0.0);
+        float specularFactor = pow(NdotH, shininess);
+
+        // Compute irradiance in dominant direction for specular
+        float s0 = max(dot(L, basis0), 0.0);
+        float s1 = max(dot(L, basis1), 0.0);
+        float s2 = max(dot(L, basis2), 0.0);
+
+        vec3 lightColor = lm0 * s0 + lm1 * s1 + lm2 * s2;
+
+        // Calculate Specular Component
+        vec3 specular = lightColor * specularFactor * specularIntensity;
+
         // Final Color
-        vec3 finalColor = albedo * diffuseLighting;
+        vec3 finalColor = diffuse + specular;
 
         FragColor = vec4(finalColor, 1.0);
     }
@@ -264,7 +356,7 @@ std::map<std::string, std::string> materialNormalMapPaths = {
     {"example_tutorial_ground", "textures/metal flat generic bump.png"},
     {"example_tutorial_metal", "textures/metal flat generic bump.png"},
     {"example_tutorial_metal_floor", "textures/metal flat generic bump.png"},
-    {"example_tutorial_plate_floor", "textures/metal plate floor bump_SSBump.png"},
+    {"example_tutorial_plate_floor", "textures/metal plate floor bump.png"},
     {"example_tutorial_panels", "textures/metal flat generic bump.png"},
     {"boulder_grey", "textures/metal flat generic bump.png"}
 };
@@ -592,7 +684,7 @@ int main() {
     std::vector<Mesh> meshes = loadModel(FileSystemUtils::getAssetFilePath("models/tutorial_map.fbx"));
 
     // Build and compile the shader program
-   // Vertex Shader
+    // Vertex Shader
     GLuint vertexShader = glCreateShader(GL_VERTEX_SHADER);
     glShaderSource(vertexShader, 1, &vertexShaderSource, NULL);
     glCompileShader(vertexShader);
@@ -686,6 +778,10 @@ int main() {
 
     bool renderLightmapOnly = false;  // Set to true to debug the lightmap
 
+    // Set specular parameters
+    float specularIntensityValue = 0.2f; // Adjust as needed
+    float shininessValue = 64.0f;        // Higher values for sharper highlights
+
     // Render loop
     while (!glfwWindowShouldClose(window)) {
         float currentFrame = static_cast<float>(glfwGetTime());
@@ -716,6 +812,9 @@ int main() {
         glUniformMatrix4fv(glGetUniformLocation(currentShaderProgram, "projection"), 1, GL_FALSE, glm::value_ptr(projection));
         glUniform3fv(glGetUniformLocation(currentShaderProgram, "viewPos"), 1, glm::value_ptr(camera.getPosition()));
 
+        glUniform1f(glGetUniformLocation(currentShaderProgram, "specularIntensity"), specularIntensityValue);
+        glUniform1f(glGetUniformLocation(currentShaderProgram, "shininess"), shininessValue);
+
         // Set up the RNM lightmaps
         glActiveTexture(GL_TEXTURE2);
         glBindTexture(GL_TEXTURE_2D, lightmap0);
@@ -738,6 +837,10 @@ int main() {
 
         // Set the debug flag
         glUniform1i(glGetUniformLocation(currentShaderProgram, "renderLightmapOnly"), renderLightmapOnly);
+
+        // Set bump strength
+        float bumpStrengthValue = 1.25f; // Adjust between 0.0 and 1.0
+        glUniform1f(glGetUniformLocation(currentShaderProgram, "bumpStrength"), bumpStrengthValue);
 
         // Render all objects
         for (const auto& mesh : meshes) {
