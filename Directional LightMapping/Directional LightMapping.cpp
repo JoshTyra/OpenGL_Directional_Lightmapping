@@ -216,7 +216,7 @@ const char* DirectionalLightmapSSBumpFragment = R"(
     }
 )";
 
-        const char* DirectionalLightmapNormalBumpFragmentShader = R"(
+const char* DirectionalLightmapNormalBumpFragmentShader = R"(
     #version 430 core
     out vec4 FragColor;
 
@@ -238,7 +238,7 @@ const char* DirectionalLightmapSSBumpFragment = R"(
 
     uniform float specularIntensity;
     uniform float shininess;
-    uniform float bumpStrength; // Added bumpStrength uniform
+    uniform float bumpStrength;
 
     void main()
     {
@@ -316,7 +316,7 @@ const char* DirectionalLightmapSSBumpFragment = R"(
         vec3 specular = lightColor * specularFactor * specularIntensity * mask;
 
         // --- Combine Diffuse, Specular, and Reflection ---
-        float reflectionIntensity = 0.1 * mask; // Reflection intensity scaled by mask
+        float reflectionIntensity = 0.25 * mask; // Reflection intensity scaled by mask
         vec3 finalColor = diffuse + specular + reflectionColor * reflectionIntensity;
 
         FragColor = vec4(finalColor, 1.0);
@@ -869,6 +869,10 @@ int main() {
         if (!useSSBump)
         {
             bumpStrengthValue = 1.25f;
+        }
+        else
+        {
+            bumpStrengthValue = 1.0f;
         }
 
         glUniform1f(glGetUniformLocation(currentShaderProgram, "bumpStrength"), bumpStrengthValue);
