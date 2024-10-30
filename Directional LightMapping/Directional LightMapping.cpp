@@ -40,6 +40,8 @@ float deltaTime = 0.0f; // Time between current frame and last frame
 float lastFrame = 0.0f; // Time of last frame
 double previousTime = 0.0;
 int frameCount = 0;
+bool useSSBump = true; // Flag to toggle between SSBump and Normal Map shaders
+bool keyPressed = false; // To handle single key press events
 
 Camera camera(glm::vec3(0.0f, 5.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f), -180.0f, 0.0f, 6.0f, 0.1f, 45.0f, 0.1f, 500.0f);
 
@@ -214,7 +216,7 @@ const char* DirectionalLightmapSSBumpFragment = R"(
     }
 )";
 
-const char* DirectionalLightmapNormalBumpFragmentShader = R"(
+        const char* DirectionalLightmapNormalBumpFragmentShader = R"(
     #version 430 core
     out vec4 FragColor;
 
@@ -236,6 +238,7 @@ const char* DirectionalLightmapNormalBumpFragmentShader = R"(
 
     uniform float specularIntensity;
     uniform float shininess;
+    uniform float bumpStrength; // Added bumpStrength uniform
 
     void main()
     {
@@ -249,7 +252,11 @@ const char* DirectionalLightmapNormalBumpFragmentShader = R"(
         vec3 tangentNormal = texture(normalMap, TexCoords).rgb;
         tangentNormal.g = 1.0 - tangentNormal.g; // Flip Y for DirectX to OpenGL conversion
         tangentNormal = normalize(tangentNormal * 2.0 - 1.0);
-        vec3 N = normalize(TBN * tangentNormal);
+
+        // Blend between the default normal and the normal map based on bumpStrength
+        vec3 baseNormal = normalize(TBN[2]); // Default normal from TBN matrix
+        vec3 mappedNormal = normalize(TBN * tangentNormal);
+        vec3 N = normalize(mix(baseNormal, mappedNormal, bumpStrength)); // Interpolated normal
 
         // --- View Vector ---
         vec3 V = normalize(viewPos - FragPos);
@@ -325,6 +332,17 @@ void processInput(GLFWwindow* window) {
         camera.processKeyboardInput(GLFW_KEY_A, deltaTime);
     if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
         camera.processKeyboardInput(GLFW_KEY_D, deltaTime);
+
+    // Toggle shader on 'L' key press
+    if (glfwGetKey(window, GLFW_KEY_L) == GLFW_PRESS && !keyPressed) {
+        useSSBump = !useSSBump;
+        keyPressed = true;
+        std::cout << "Switched to " << (useSSBump ? "SSBump" : "Normal Map") << " shader." << std::endl;
+    }
+
+    if (glfwGetKey(window, GLFW_KEY_L) == GLFW_RELEASE) {
+        keyPressed = false;
+    }
 }
 
 void mouseCallback(GLFWwindow* window, double xpos, double ypos) {
@@ -361,16 +379,21 @@ std::string getFilenameFromPath(const std::string& path) {
         return path;
 }
 
+struct MaterialNormalMaps {
+    std::string ssbumpPath;
+    std::string normalMapPath;
+};
+
 // Define this mapping globally or pass it to your loadModel function
-std::map<std::string, std::string> materialNormalMapPaths = {
-    {"example_tutorial_ground", "textures/default_bump_SSBump.tga"},
-    {"example_tutorial_metal", "textures/default_bump_SSBump.tga"},
-    {"example_tutorial_metal_floor", "textures/panels_generic_outdoor_bump_SSBump.png"},
-    {"example_tutorial_plate_floor", "textures/metal plate floor bump_SSBump.png"},
-    {"example_tutorial_panels", "textures/default_bump_SSBump.tga"},
-    {"boulder_grey", "textures/default_bump_SSBump.tga"},
-    {"example_tutorial_lights_blue", "textures/default_bump_SSBump.tga"},
-    {"example_tutorial_lights_red", "textures/default_bump_SSBump.tga"}
+std::map<std::string, MaterialNormalMaps> materialNormalMapPaths = {
+    {"example_tutorial_ground", {"textures/default_bump_SSBump.tga", "textures/default_bump.tga"}},
+    {"example_tutorial_metal", {"textures/default_bump_SSBump.tga", "textures/default_bump.tga"}},
+    {"example_tutorial_metal_floor", {"textures/panels_generic_outdoor_bump_SSBump.png", "textures/panels_generic_outdoor_bump.png"}},
+    {"example_tutorial_plate_floor", {"textures/metal plate floor bump_SSBump.png", "textures/metal plate floor bump.tga"}},
+    {"example_tutorial_panels", {"textures/default_bump_SSBump.tga", "textures/default_bump.tga"}},
+    {"boulder_grey", {"textures/default_bump_SSBump.tga", "textures/default_bump.tga"}},
+    {"example_tutorial_lights_blue", {"textures/default_bump_SSBump.tga", "textures/default_bump.tga"}},
+    {"example_tutorial_lights_red", {"textures/default_bump_SSBump.tga", "textures/default_bump.tga"}}
 };
 
 GLuint createFlatNormalMap() {
@@ -405,11 +428,11 @@ struct Mesh {
     std::vector<unsigned int> indices;
     mutable unsigned int VAO;
     GLuint diffuseTexture;
-    GLuint normalMapTexture;
+    GLuint ssbumpMapTexture;    // SSBump map texture
+    GLuint normalMapTexture;    // Traditional normal map texture
 
-    // Updated constructor (no lightmap here)
-    Mesh(std::vector<Vertex> vertices, std::vector<unsigned int> indices, GLuint diffuseTexture, GLuint normalMapTexture)
-        : vertices(vertices), indices(indices), diffuseTexture(diffuseTexture), normalMapTexture(normalMapTexture) {
+    Mesh(std::vector<Vertex> vertices, std::vector<unsigned int> indices, GLuint diffuseTexture, GLuint ssbumpMapTexture, GLuint normalMapTexture)
+        : vertices(vertices), indices(indices), diffuseTexture(diffuseTexture), ssbumpMapTexture(ssbumpMapTexture), normalMapTexture(normalMapTexture) {
         setupMesh();
     }
 
@@ -450,16 +473,24 @@ struct Mesh {
         glBindVertexArray(0);
     }
 
-    void Draw(GLuint shaderProgram) const {
+    void Draw(GLuint shaderProgram, bool useSSBump) const {
         // Bind diffuse texture (use texture unit 0)
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, diffuseTexture);
         glUniform1i(glGetUniformLocation(shaderProgram, "diffuseTexture"), 0);
 
-        // Bind normal map texture (use texture unit 1)
-        glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, normalMapTexture);
-        glUniform1i(glGetUniformLocation(shaderProgram, "ssbumpMap"), 1);
+        if (useSSBump) {
+            // Bind SSBump map to texture unit 1
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, ssbumpMapTexture);
+            glUniform1i(glGetUniformLocation(shaderProgram, "ssbumpMap"), 1);
+        }
+        else {
+            // Bind normal map to texture unit 1
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, normalMapTexture);
+            glUniform1i(glGetUniformLocation(shaderProgram, "normalMap"), 1);
+        }
 
         // Bind VAO and draw the mesh
         glBindVertexArray(VAO);
@@ -556,27 +587,49 @@ std::vector<Mesh> loadModel(const std::string& path) {
             diffuseTexture = loadTextureFromFile(texturePath.c_str(), "");
         }
 
-        // Load normal map texture (with fallback to flat normal map)
+        // Load SSBump map texture
+        GLuint ssbumpMapTexture = 0;
         if (material->GetTextureCount(aiTextureType_NORMALS) > 0) {
             aiString str;
             material->GetTexture(aiTextureType_NORMALS, 0, &str);
             std::string textureFilename = getFilenameFromPath(str.C_Str());
             std::string texturePath = FileSystemUtils::getAssetFilePath("textures/" + textureFilename);
+            ssbumpMapTexture = loadTextureFromFile(texturePath.c_str(), "");
+        }
+        else if (materialNormalMapPaths.find(matName) != materialNormalMapPaths.end()) {
+            std::string ssbumpMapPath = FileSystemUtils::getAssetFilePath(materialNormalMapPaths[matName].ssbumpPath);
+            ssbumpMapTexture = loadTextureFromFile(ssbumpMapPath.c_str(), "");
+        }
+        else {
+            ssbumpMapTexture = flatNormalMap; // Default SSBump map if none specified
+        }
+
+        // Load traditional normal map texture
+        GLuint normalMapTexture = 0;
+        if (material->GetTextureCount(aiTextureType_HEIGHT) > 0) { // aiTextureType_HEIGHT often used for normal maps
+            aiString str;
+            material->GetTexture(aiTextureType_HEIGHT, 0, &str);
+            std::string textureFilename = getFilenameFromPath(str.C_Str());
+            std::string texturePath = FileSystemUtils::getAssetFilePath("textures/" + textureFilename);
             normalMapTexture = loadTextureFromFile(texturePath.c_str(), "");
         }
         else if (materialNormalMapPaths.find(matName) != materialNormalMapPaths.end()) {
-            std::string normalMapPath = FileSystemUtils::getAssetFilePath(materialNormalMapPaths[matName]);
+            std::string normalMapPath = FileSystemUtils::getAssetFilePath(materialNormalMapPaths[matName].normalMapPath);
             normalMapTexture = loadTextureFromFile(normalMapPath.c_str(), "");
         }
         else {
             normalMapTexture = flatNormalMap; // Default normal map if none specified
         }
 
+        if (ssbumpMapTexture == 0) {
+            std::cerr << "Failed to load SSBump map for material: " << matName << std::endl;
+        }
+
         if (normalMapTexture == 0) {
             std::cerr << "Failed to load normal map for material: " << matName << std::endl;
         }
 
-        meshes.push_back(Mesh(vertices, indices, diffuseTexture, normalMapTexture));
+        meshes.push_back(Mesh(vertices, indices, diffuseTexture, ssbumpMapTexture, normalMapTexture));
     }
 
     return meshes;
@@ -643,6 +696,53 @@ unsigned int loadCubemap(std::vector<std::string> faces) {
     return textureID;
 }
 
+GLuint compileShader(const char* vertexSrc, const char* fragmentSrc, const std::string& shaderName) {
+    // Compile Vertex Shader
+    GLuint vertexShader = glCreateShader(GL_VERTEX_SHADER);
+    glShaderSource(vertexShader, 1, &vertexSrc, NULL);
+    glCompileShader(vertexShader);
+
+    // Check Vertex Shader
+    int success;
+    char infoLog[512];
+    glGetShaderiv(vertexShader, GL_COMPILE_STATUS, &success);
+    if (!success) {
+        glGetShaderInfoLog(vertexShader, 512, NULL, infoLog);
+        std::cerr << "ERROR::SHADER::VERTEX::COMPILATION_FAILED of " << shaderName << "\n" << infoLog << std::endl;
+    }
+
+    // Compile Fragment Shader
+    GLuint fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
+    glShaderSource(fragmentShader, 1, &fragmentSrc, NULL);
+    glCompileShader(fragmentShader);
+
+    // Check Fragment Shader
+    glGetShaderiv(fragmentShader, GL_COMPILE_STATUS, &success);
+    if (!success) {
+        glGetShaderInfoLog(fragmentShader, 512, NULL, infoLog);
+        std::cerr << "ERROR::SHADER::FRAGMENT::COMPILATION_FAILED of " << shaderName << "\n" << infoLog << std::endl;
+    }
+
+    // Link Shaders
+    GLuint shaderProgram = glCreateProgram();
+    glAttachShader(shaderProgram, vertexShader);
+    glAttachShader(shaderProgram, fragmentShader);
+    glLinkProgram(shaderProgram);
+
+    // Check Linking
+    glGetProgramiv(shaderProgram, GL_LINK_STATUS, &success);
+    if (!success) {
+        glGetProgramInfoLog(shaderProgram, 512, NULL, infoLog);
+        std::cerr << "ERROR::SHADER::PROGRAM::LINKING_FAILED of " << shaderName << "\n" << infoLog << std::endl;
+    }
+
+    // Clean up shaders as they're linked into the program now and no longer necessary
+    glDeleteShader(vertexShader);
+    glDeleteShader(fragmentShader);
+
+    return shaderProgram;
+}
+
 int main() {
     // Initialize GLFW
     if (!glfwInit()) {
@@ -695,47 +795,11 @@ int main() {
     // Load the model
     std::vector<Mesh> meshes = loadModel(FileSystemUtils::getAssetFilePath("models/tutorial_map.fbx"));
 
-    // Build and compile the shader program
-    // Vertex Shader
-    GLuint vertexShader = glCreateShader(GL_VERTEX_SHADER);
-    glShaderSource(vertexShader, 1, &LightMappingShaderSource, NULL);
-    glCompileShader(vertexShader);
+    // Compile SSBump Shader Program
+    GLuint shaderProgramSSBump = compileShader(LightMappingShaderSource, DirectionalLightmapSSBumpFragment, "SSBump");
 
-    // Check for shader compile errors
-    int success;
-    char infoLog[512];
-    glGetShaderiv(vertexShader, GL_COMPILE_STATUS, &success);
-    if (!success) {
-        glGetShaderInfoLog(vertexShader, 512, NULL, infoLog);
-        std::cerr << "ERROR::VERTEX_SHADER::COMPILATION_FAILED\n" << infoLog << std::endl;
-    }
-
-    // Fragment Shader
-    GLuint fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
-    glShaderSource(fragmentShader, 1, &DirectionalLightmapSSBumpFragment, NULL);
-    glCompileShader(fragmentShader);
-
-    // Check for shader compile errors
-    glGetShaderiv(fragmentShader, GL_COMPILE_STATUS, &success);
-    if (!success) {
-        glGetShaderInfoLog(fragmentShader, 512, NULL, infoLog);
-        std::cerr << "ERROR::FRAGMENT_SHADER::COMPILATION_FAILED\n" << infoLog << std::endl;
-    }
-
-    // Link shaders
-    GLuint shaderProgram = glCreateProgram();
-    glAttachShader(shaderProgram, vertexShader);
-    glAttachShader(shaderProgram, fragmentShader);
-    glLinkProgram(shaderProgram);
-
-    // Check for linking errors
-    glGetProgramiv(shaderProgram, GL_LINK_STATUS, &success);
-    if (!success) {
-        glGetProgramInfoLog(shaderProgram, 512, NULL, infoLog);
-        std::cerr << "ERROR::SHADER_PROGRAM::LINKING_FAILED\n" << infoLog << std::endl;
-    }
-    glDeleteShader(vertexShader);
-    glDeleteShader(fragmentShader);
+    // Compile Normal Map Shader Program
+    GLuint shaderProgramNormalBump = compileShader(LightMappingShaderSource, DirectionalLightmapNormalBumpFragmentShader, "NormalBump");
 
     // Load the cubemap textures
     std::vector<std::string> faces = {
@@ -786,8 +850,8 @@ int main() {
         glClearColor(0.3f, 0.3f, 0.4f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        // Use the selected shader program
-        GLuint currentShaderProgram = shaderProgram;
+        // Select the active shader program
+        GLuint currentShaderProgram = useSSBump ? shaderProgramSSBump : shaderProgramNormalBump;
         glUseProgram(currentShaderProgram);
 
         // Set up view and projection matrices
@@ -802,7 +866,11 @@ int main() {
         glUniform1f(glGetUniformLocation(currentShaderProgram, "specularIntensity"), specularIntensityValue);
         glUniform1f(glGetUniformLocation(currentShaderProgram, "shininess"), shininessValue);
 
-        // Set bump strength
+        if (!useSSBump)
+        {
+            bumpStrengthValue = 1.25f;
+        }
+
         glUniform1f(glGetUniformLocation(currentShaderProgram, "bumpStrength"), bumpStrengthValue);
 
         // Set up the RNM lightmaps
@@ -831,7 +899,7 @@ int main() {
             model = glm::scale(model, glm::vec3(0.01f));
             model = glm::rotate(model, glm::radians(-90.0f), glm::vec3(1.0f, 0.0f, 0.0f));
             glUniformMatrix4fv(glGetUniformLocation(currentShaderProgram, "model"), 1, GL_FALSE, glm::value_ptr(model));
-            mesh.Draw(currentShaderProgram);
+            mesh.Draw(currentShaderProgram, useSSBump);
         }
 
         // Swap buffers and poll IO events
@@ -840,7 +908,8 @@ int main() {
     }
 
     // Clean up
-    glDeleteProgram(shaderProgram);
+    glDeleteProgram(shaderProgramSSBump);
+    glDeleteProgram(shaderProgramNormalBump);
 
     glfwTerminate();
     return 0;
