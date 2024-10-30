@@ -40,7 +40,6 @@ float deltaTime = 0.0f; // Time between current frame and last frame
 float lastFrame = 0.0f; // Time of last frame
 double previousTime = 0.0;
 int frameCount = 0;
-bool useHL2Shader = false;
 
 Camera camera(glm::vec3(0.0f, 5.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f), -180.0f, 0.0f, 6.0f, 0.1f, 45.0f, 0.1f, 500.0f);
 
@@ -92,7 +91,7 @@ const char* fragmentShaderSource = R"(
     in mat3 TBN;
 
     uniform sampler2D diffuseTexture;
-    uniform sampler2D normalMap;
+    uniform sampler2D ssbumpMap;
     uniform sampler2D lightmap0;
     uniform sampler2D lightmap1;
     uniform sampler2D lightmap2;
@@ -114,16 +113,32 @@ const char* fragmentShaderSource = R"(
             return;
         }
 
-        // Normal Mapping with Bump Strength Control
-        vec3 tangentNormal = texture(normalMap, TexCoords).rgb;
-        tangentNormal.g = 1.0 - tangentNormal.g; // Flip Y for DirectX to OpenGL conversion
-        tangentNormal = tangentNormal * 2.0 - 1.0; // Convert to [-1, 1] range
+        // --- Extract basis vectors from TBN matrix ---
+        vec3 basis0 = normalize(TBN[0]); // Tangent
+        vec3 basis1 = normalize(TBN[1]); // Bitangent
+        vec3 basis2 = normalize(TBN[2]); // Normal
 
-        vec3 defaultNormal = vec3(0.0, 0.0, 1.0); // Default normal in tangent space
+        // --- Sample and process SSBUMP map ---
+        vec3 ssbump = texture(ssbumpMap, TexCoords).rgb;
+        ssbump.g = 1.0 - ssbump.g;  // Flip green channel for DirectX to OpenGL conversion
+        // The Z-flip is only needed for SSBump maps because they work with basis coefficients rather than direct normal vectors.
+        ssbump.b = 1.0 - ssbump.b;
+    
+        // Convert from [0,1] to [-1,1] range
+        ssbump = ssbump * 2.0 - 1.0;
 
-        // Blend between default normal and normal map normal
-        tangentNormal = normalize(mix(defaultNormal, tangentNormal, bumpStrength));
-        vec3 N = normalize(TBN * tangentNormal);
+        // Create default normal coefficients (no bump)
+        vec3 defaultCoeffs = vec3(0.0, 0.0, 1.0);
+    
+        // Blend between default and SSBUMP coefficients based on bump strength
+        vec3 finalCoeffs = normalize(mix(defaultCoeffs, ssbump, bumpStrength));
+
+        // --- Construct the normal using the blended coefficients ---
+        vec3 N = normalize(
+            basis0 * finalCoeffs.x +
+            basis1 * finalCoeffs.y +
+            basis2 * finalCoeffs.z
+        );
 
         // --- View Vector ---
         vec3 V = normalize(viewPos - FragPos);
@@ -142,30 +157,35 @@ const char* fragmentShaderSource = R"(
         float lum1 = dot(lm1, vec3(0.2126, 0.7152, 0.0722));
         float lum2 = dot(lm2, vec3(0.2126, 0.7152, 0.0722));
 
-        // --- Extract Basis Vectors from TBN Matrix ---
-        vec3 basis0 = normalize(TBN[0]); // Tangent
-        vec3 basis1 = normalize(TBN[1]); // Bitangent
-        vec3 basis2 = normalize(TBN[2]); // Normal
+        // --- Compute lighting coefficients using the blended normal ---
+        float c0 = max(0.0, dot(N, basis0));
+        float c1 = max(0.0, dot(N, basis1));
+        float c2 = max(0.0, dot(N, basis2));
+
+        // --- Calculate per-basis lighting contribution ---
+        vec3 lighting0 = lm0 * c0;
+        vec3 lighting1 = lm1 * c1;
+        vec3 lighting2 = lm2 * c2;
+
+        // --- Combine lighting from all bases ---
+        vec3 diffuseLighting = lighting0 + lighting1 + lighting2;
 
         // --- Compute Dominant Light Direction ---
-        vec3 dominantDir = lum0 * basis0 + lum1 * basis1 + lum2 * basis2;
-        dominantDir = normalize(dominantDir);
+        vec3 dominantDir = normalize(
+            basis0 * lum0 +
+            basis1 * lum1 +
+            basis2 * lum2
+        );
 
-        // --- Diffuse Lighting Calculation ---
-        float l0 = max(dot(N, basis0), 0.0);
-        float l1 = max(dot(N, basis1), 0.0);
-        float l2 = max(dot(N, basis2), 0.0);
-
-        vec3 diffuseLighting = lm0 * l0 + lm1 * l1 + lm2 * l2;
-
-        // --- Fetch Diffuse Color ---
-        vec3 albedo = texture(diffuseTexture, TexCoords).rgb;
+        // --- Fetch Diffuse Color and Alpha (Specular Mask) ---
+        vec4 albedoWithAlpha = texture(diffuseTexture, TexCoords);
+        vec3 albedo = albedoWithAlpha.rgb;
+        float specularMask = albedoWithAlpha.a;
 
         // --- Calculate Diffuse Component ---
         vec3 diffuse = albedo * diffuseLighting;
 
         // --- Specular Lighting Calculation ---
-        // Blinn-Phong Specular Model
         vec3 H = normalize(V + dominantDir);
         float NdotH = max(dot(N, H), 0.0);
         float specularFactor = pow(NdotH, shininess);
@@ -177,117 +197,18 @@ const char* fragmentShaderSource = R"(
 
         vec3 lightColor = lm0 * s0 + lm1 * s1 + lm2 * s2;
 
+        // Apply specular mask to the specular intensity
+        float maskedSpecularIntensity = specularIntensity * specularMask;
+
         // Calculate Specular Component
-        vec3 specular = lightColor * specularFactor * specularIntensity;
+        vec3 specular = lightColor * specularFactor * maskedSpecularIntensity;
+
+        // --- Apply Specular Mask to Reflection ---
+        float reflectionIntensity = 0.25;
+        vec3 maskedReflection = reflectionColor * reflectionIntensity * specularMask;
 
         // --- Combine Diffuse, Specular, and Reflection ---
-        float reflectionIntensity = 0.1; // Adjust between 0.0 and 1.0
-        vec3 finalColor = diffuse + specular + reflectionColor * reflectionIntensity;
-
-        FragColor = vec4(finalColor, 1.0);
-    }
-)";
-
-const char* hl2FragmentShaderSource = R"(
-    #version 430 core
-    out vec4 FragColor;
-
-    in vec2 TexCoords;
-    in vec2 LightmapTexCoords;
-    in vec3 FragPos;
-    in mat3 TBN;
-
-    uniform sampler2D diffuseTexture;
-    uniform sampler2D normalMap;
-    uniform sampler2D lightmap0;
-    uniform sampler2D lightmap1;
-    uniform sampler2D lightmap2;
-
-    uniform vec3 viewPos;
-
-    uniform bool renderLightmapOnly;
-
-    uniform float bumpStrength;
-    uniform float specularIntensity;
-    uniform float shininess;
-
-    void main()
-    {
-        if (renderLightmapOnly) {
-            vec3 lm0 = texture(lightmap0, LightmapTexCoords).rgb;
-            FragColor = vec4(lm0, 1.0);
-            return;
-        }
-
-        // Normal Mapping with Bump Strength Control
-        vec3 tangentNormal = texture(normalMap, TexCoords).rgb;
-        tangentNormal.g = 1.0 - tangentNormal.g; // Flip Y for DirectX to OpenGL conversion
-        tangentNormal = tangentNormal * 2.0 - 1.0; // Convert to [-1, 1] range
-
-        vec3 defaultNormal = vec3(0.0, 0.0, 1.0); // Default normal in tangent space
-
-        // Blend between default normal and normal map normal
-        tangentNormal = normalize(mix(defaultNormal, tangentNormal, bumpStrength));
-
-        // Transform normal to world space
-        vec3 N = normalize(TBN * tangentNormal);
-
-        // View Vector
-        vec3 V = normalize(viewPos - FragPos);
-
-        // Sample lightmaps
-        vec3 lm0 = texture(lightmap0, LightmapTexCoords).rgb;
-        vec3 lm1 = texture(lightmap1, LightmapTexCoords).rgb;
-        vec3 lm2 = texture(lightmap2, LightmapTexCoords).rgb;
-
-        // Compute luminance of each lightmap (using standard luminance coefficients)
-        float lum0 = dot(lm0, vec3(0.2126, 0.7152, 0.0722));
-        float lum1 = dot(lm1, vec3(0.2126, 0.7152, 0.0722));
-        float lum2 = dot(lm2, vec3(0.2126, 0.7152, 0.0722));
-
-        // Get basis vectors from TBN matrix
-        vec3 basis0 = normalize(TBN[0]); // Tangent
-        vec3 basis1 = normalize(TBN[1]); // Bitangent
-        vec3 basis2 = normalize(TBN[2]); // Normal
-
-        // Compute dominant light direction
-        vec3 dominantDir = lum0 * basis0 + lum1 * basis1 + lum2 * basis2;
-        dominantDir = normalize(dominantDir);
-
-        // Light direction
-        vec3 L = dominantDir;
-
-        // --- Diffuse Lighting Calculation ---
-        float l0 = max(dot(N, basis0), 0.0);
-        float l1 = max(dot(N, basis1), 0.0);
-        float l2 = max(dot(N, basis2), 0.0);
-
-        vec3 diffuseLighting = lm0 * l0 + lm1 * l1 + lm2 * l2;
-
-        // Fetch diffuse color
-        vec3 albedo = texture(diffuseTexture, TexCoords).rgb;
-
-        // Calculate Diffuse Component
-        vec3 diffuse = albedo * diffuseLighting;
-
-        // --- Specular Lighting Calculation ---
-        // Blinn-Phong Specular
-        vec3 H = normalize(V + L);
-        float NdotH = max(dot(N, H), 0.0);
-        float specularFactor = pow(NdotH, shininess);
-
-        // Compute irradiance in dominant direction for specular
-        float s0 = max(dot(L, basis0), 0.0);
-        float s1 = max(dot(L, basis1), 0.0);
-        float s2 = max(dot(L, basis2), 0.0);
-
-        vec3 lightColor = lm0 * s0 + lm1 * s1 + lm2 * s2;
-
-        // Calculate Specular Component
-        vec3 specular = lightColor * specularFactor * specularIntensity;
-
-        // Final Color
-        vec3 finalColor = diffuse + specular;
+        vec3 finalColor = diffuse + specular + maskedReflection;
 
         FragColor = vec4(finalColor, 1.0);
     }
@@ -302,19 +223,6 @@ void processInput(GLFWwindow* window) {
         camera.processKeyboardInput(GLFW_KEY_A, deltaTime);
     if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
         camera.processKeyboardInput(GLFW_KEY_D, deltaTime);
-
-    // Shader toggle key
-    static bool f1Pressed = false;
-    if (glfwGetKey(window, GLFW_KEY_F1) == GLFW_PRESS) {
-        if (!f1Pressed) {
-            useHL2Shader = !useHL2Shader;
-            std::cout << "Shader toggled: " << (useHL2Shader ? "HL2 RNM Shader" : "Current Shader") << std::endl;
-            f1Pressed = true;
-        }
-    }
-    if (glfwGetKey(window, GLFW_KEY_F1) == GLFW_RELEASE) {
-        f1Pressed = false;
-    }
 }
 
 void mouseCallback(GLFWwindow* window, double xpos, double ypos) {
@@ -353,12 +261,14 @@ std::string getFilenameFromPath(const std::string& path) {
 
 // Define this mapping globally or pass it to your loadModel function
 std::map<std::string, std::string> materialNormalMapPaths = {
-    {"example_tutorial_ground", "textures/metal flat generic bump.png"},
-    {"example_tutorial_metal", "textures/metal flat generic bump.png"},
-    {"example_tutorial_metal_floor", "textures/metal flat generic bump.png"},
-    {"example_tutorial_plate_floor", "textures/metal plate floor bump.png"},
-    {"example_tutorial_panels", "textures/metal flat generic bump.png"},
-    {"boulder_grey", "textures/metal flat generic bump.png"}
+    {"example_tutorial_ground", "textures/default_bump_SSBump.tga"},
+    {"example_tutorial_metal", "textures/default_bump_SSBump.tga"},
+    {"example_tutorial_metal_floor", "textures/panels_generic_outdoor_bump_SSBump.png"},
+    {"example_tutorial_plate_floor", "textures/metal plate floor bump_SSBump.png"},
+    {"example_tutorial_panels", "textures/default_bump_SSBump.tga"},
+    {"boulder_grey", "textures/default_bump_SSBump.tga"},
+    {"example_tutorial_lights_blue", "textures/default_bump_SSBump.tga"},
+    {"example_tutorial_lights_red", "textures/default_bump_SSBump.tga"}
 };
 
 GLuint createFlatNormalMap() {
@@ -447,7 +357,7 @@ struct Mesh {
         // Bind normal map texture (use texture unit 1)
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(GL_TEXTURE_2D, normalMapTexture);
-        glUniform1i(glGetUniformLocation(shaderProgram, "normalMap"), 1);
+        glUniform1i(glGetUniformLocation(shaderProgram, "ssbumpMap"), 1);
 
         // Bind VAO and draw the mesh
         glBindVertexArray(VAO);
@@ -725,34 +635,6 @@ int main() {
     glDeleteShader(vertexShader);
     glDeleteShader(fragmentShader);
 
-    // Compile HL2 RNM Fragment Shader
-    GLuint hl2FragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
-    glShaderSource(hl2FragmentShader, 1, &hl2FragmentShaderSource, NULL);
-    glCompileShader(hl2FragmentShader);
-
-    // Check for compile errors
-    glGetShaderiv(hl2FragmentShader, GL_COMPILE_STATUS, &success);
-    if (!success) {
-        glGetShaderInfoLog(hl2FragmentShader, 512, NULL, infoLog);
-        std::cerr << "ERROR::HL2_FRAGMENT_SHADER::COMPILATION_FAILED\n" << infoLog << std::endl;
-    }
-
-    // Create HL2 Shader Program
-    GLuint hl2ShaderProgram = glCreateProgram();
-    glAttachShader(hl2ShaderProgram, vertexShader);
-    glAttachShader(hl2ShaderProgram, hl2FragmentShader);
-    glLinkProgram(hl2ShaderProgram);
-
-    // Check for linking errors
-    glGetProgramiv(hl2ShaderProgram, GL_LINK_STATUS, &success);
-    if (!success) {
-        glGetProgramInfoLog(hl2ShaderProgram, 512, NULL, infoLog);
-        std::cerr << "ERROR::HL2_SHADER_PROGRAM::LINKING_FAILED\n" << infoLog << std::endl;
-    }
-
-    // Clean up
-    glDeleteShader(hl2FragmentShader);
-
     // Load the cubemap textures
     std::vector<std::string> faces = {
         FileSystemUtils::getAssetFilePath("textures/cubemaps/water_right.tga"),
@@ -779,8 +661,11 @@ int main() {
     bool renderLightmapOnly = false;  // Set to true to debug the lightmap
 
     // Set specular parameters
-    float specularIntensityValue = 0.2f; // Adjust as needed
+    float specularIntensityValue = 0.65f; // Adjust as needed
     float shininessValue = 64.0f;        // Higher values for sharper highlights
+
+    // Set bump strength
+    float bumpStrengthValue = 1.0f; // Adjust between 0.0 and 1.0
 
     // Render loop
     while (!glfwWindowShouldClose(window)) {
@@ -800,7 +685,7 @@ int main() {
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
         // Use the selected shader program
-        GLuint currentShaderProgram = useHL2Shader ? hl2ShaderProgram : shaderProgram;
+        GLuint currentShaderProgram = shaderProgram;
         glUseProgram(currentShaderProgram);
 
         // Set up view and projection matrices
@@ -815,6 +700,9 @@ int main() {
         glUniform1f(glGetUniformLocation(currentShaderProgram, "specularIntensity"), specularIntensityValue);
         glUniform1f(glGetUniformLocation(currentShaderProgram, "shininess"), shininessValue);
 
+        // Set bump strength
+        glUniform1f(glGetUniformLocation(currentShaderProgram, "bumpStrength"), bumpStrengthValue);
+
         // Set up the RNM lightmaps
         glActiveTexture(GL_TEXTURE2);
         glBindTexture(GL_TEXTURE_2D, lightmap0);
@@ -828,19 +716,12 @@ int main() {
         glBindTexture(GL_TEXTURE_2D, lightmap2);
         glUniform1i(glGetUniformLocation(currentShaderProgram, "lightmap2"), 4);
 
-        // Set up the cubemap only if using the current shader
-        if (!useHL2Shader) {
-            glActiveTexture(GL_TEXTURE5);
-            glBindTexture(GL_TEXTURE_CUBE_MAP, cubemapTexture);
-            glUniform1i(glGetUniformLocation(currentShaderProgram, "environmentMap"), 5);
-        }
+        glActiveTexture(GL_TEXTURE5);
+        glBindTexture(GL_TEXTURE_CUBE_MAP, cubemapTexture);
+        glUniform1i(glGetUniformLocation(currentShaderProgram, "environmentMap"), 5);
 
         // Set the debug flag
         glUniform1i(glGetUniformLocation(currentShaderProgram, "renderLightmapOnly"), renderLightmapOnly);
-
-        // Set bump strength
-        float bumpStrengthValue = 1.25f; // Adjust between 0.0 and 1.0
-        glUniform1f(glGetUniformLocation(currentShaderProgram, "bumpStrength"), bumpStrengthValue);
 
         // Render all objects
         for (const auto& mesh : meshes) {
@@ -858,7 +739,6 @@ int main() {
 
     // Clean up
     glDeleteProgram(shaderProgram);
-    glDeleteProgram(hl2ShaderProgram);
 
     glfwTerminate();
     return 0;
