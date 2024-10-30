@@ -43,7 +43,7 @@ int frameCount = 0;
 
 Camera camera(glm::vec3(0.0f, 5.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f), -180.0f, 0.0f, 6.0f, 0.1f, 45.0f, 0.1f, 500.0f);
 
-const char* vertexShaderSource = R"(
+const char* LightMappingShaderSource = R"(
     #version 430 core
     layout (location = 0) in vec3 aPos;
     layout (location = 1) in vec3 aNormal;
@@ -81,7 +81,7 @@ const char* vertexShaderSource = R"(
     }
 )";
 
-const char* fragmentShaderSource = R"(
+const char* DirectionalLightmapSSBumpFragment = R"(
     #version 430 core
     out vec4 FragColor;
 
@@ -209,6 +209,108 @@ const char* fragmentShaderSource = R"(
 
         // --- Combine Diffuse, Specular, and Reflection ---
         vec3 finalColor = diffuse + specular + maskedReflection;
+
+        FragColor = vec4(finalColor, 1.0);
+    }
+)";
+
+const char* DirectionalLightmapNormalBumpFragmentShader = R"(
+    #version 430 core
+    out vec4 FragColor;
+
+    in vec2 TexCoords;
+    in vec2 LightmapTexCoords;
+    in vec3 FragPos;
+    in mat3 TBN;
+
+    uniform sampler2D diffuseTexture;
+    uniform sampler2D normalMap;
+    uniform sampler2D lightmap0;
+    uniform sampler2D lightmap1;
+    uniform sampler2D lightmap2;
+    uniform samplerCube environmentMap;
+
+    uniform vec3 viewPos;
+
+    uniform bool renderLightmapOnly;
+
+    uniform float specularIntensity;
+    uniform float shininess;
+
+    void main()
+    {
+        if (renderLightmapOnly) {
+            vec3 lm0 = texture(lightmap0, LightmapTexCoords).rgb;
+            FragColor = vec4(lm0, 1.0);
+            return;
+        }
+
+        // --- Normal Mapping ---
+        vec3 tangentNormal = texture(normalMap, TexCoords).rgb;
+        tangentNormal.g = 1.0 - tangentNormal.g; // Flip Y for DirectX to OpenGL conversion
+        tangentNormal = normalize(tangentNormal * 2.0 - 1.0);
+        vec3 N = normalize(TBN * tangentNormal);
+
+        // --- View Vector ---
+        vec3 V = normalize(viewPos - FragPos);
+
+        // --- Reflection Vector for Environment Map ---
+        vec3 R = reflect(-V, N);
+        vec3 reflectionColor = texture(environmentMap, R).rgb;
+
+        // --- Sample RNM Lightmaps ---
+        vec3 lm0 = texture(lightmap0, LightmapTexCoords).rgb;
+        vec3 lm1 = texture(lightmap1, LightmapTexCoords).rgb;
+        vec3 lm2 = texture(lightmap2, LightmapTexCoords).rgb;
+
+        // --- Compute Luminance of Each Lightmap Sample ---
+        float lum0 = dot(lm0, vec3(0.2126, 0.7152, 0.0722));
+        float lum1 = dot(lm1, vec3(0.2126, 0.7152, 0.0722));
+        float lum2 = dot(lm2, vec3(0.2126, 0.7152, 0.0722));
+
+        // --- Extract Basis Vectors from TBN Matrix ---
+        vec3 basis0 = normalize(TBN[0]); // Tangent
+        vec3 basis1 = normalize(TBN[1]); // Bitangent
+        vec3 basis2 = normalize(TBN[2]); // Normal
+
+        // --- Compute Dominant Light Direction ---
+        vec3 dominantDir = lum0 * basis0 + lum1 * basis1 + lum2 * basis2;
+        dominantDir = normalize(dominantDir);
+
+        // --- Diffuse Lighting Calculation ---
+        float l0 = max(dot(N, basis0), 0.0);
+        float l1 = max(dot(N, basis1), 0.0);
+        float l2 = max(dot(N, basis2), 0.0);
+
+        vec3 diffuseLighting = lm0 * l0 + lm1 * l1 + lm2 * l2;
+
+        // --- Fetch Diffuse Color and Alpha for Masking ---
+        vec4 albedo = texture(diffuseTexture, TexCoords);
+        vec3 diffuseColor = albedo.rgb;
+        float mask = albedo.a;  // Use alpha as the mask for specular and reflection
+
+        // --- Calculate Diffuse Component ---
+        vec3 diffuse = diffuseColor * diffuseLighting;
+
+        // --- Specular Lighting Calculation ---
+        // Blinn-Phong Specular Model
+        vec3 H = normalize(V + dominantDir);
+        float NdotH = max(dot(N, H), 0.0);
+        float specularFactor = pow(NdotH, shininess);
+
+        // Compute irradiance in dominant direction for specular
+        float s0 = max(dot(dominantDir, basis0), 0.0);
+        float s1 = max(dot(dominantDir, basis1), 0.0);
+        float s2 = max(dot(dominantDir, basis2), 0.0);
+
+        vec3 lightColor = lm0 * s0 + lm1 * s1 + lm2 * s2;
+
+        // Calculate Specular Component (scaled by mask)
+        vec3 specular = lightColor * specularFactor * specularIntensity * mask;
+
+        // --- Combine Diffuse, Specular, and Reflection ---
+        float reflectionIntensity = 0.1 * mask; // Reflection intensity scaled by mask
+        vec3 finalColor = diffuse + specular + reflectionColor * reflectionIntensity;
 
         FragColor = vec4(finalColor, 1.0);
     }
@@ -596,7 +698,7 @@ int main() {
     // Build and compile the shader program
     // Vertex Shader
     GLuint vertexShader = glCreateShader(GL_VERTEX_SHADER);
-    glShaderSource(vertexShader, 1, &vertexShaderSource, NULL);
+    glShaderSource(vertexShader, 1, &LightMappingShaderSource, NULL);
     glCompileShader(vertexShader);
 
     // Check for shader compile errors
@@ -610,7 +712,7 @@ int main() {
 
     // Fragment Shader
     GLuint fragmentShader = glCreateShader(GL_FRAGMENT_SHADER);
-    glShaderSource(fragmentShader, 1, &fragmentShaderSource, NULL);
+    glShaderSource(fragmentShader, 1, &DirectionalLightmapSSBumpFragment, NULL);
     glCompileShader(fragmentShader);
 
     // Check for shader compile errors
@@ -637,12 +739,12 @@ int main() {
 
     // Load the cubemap textures
     std::vector<std::string> faces = {
-        FileSystemUtils::getAssetFilePath("textures/cubemaps/water_right.tga"),
-        FileSystemUtils::getAssetFilePath("textures/cubemaps/water_left.tga"),
-        FileSystemUtils::getAssetFilePath("textures/cubemaps/water_up.tga"),
-        FileSystemUtils::getAssetFilePath("textures/cubemaps/water_down.tga"),
-        FileSystemUtils::getAssetFilePath("textures/cubemaps/water_front.tga"),
-        FileSystemUtils::getAssetFilePath("textures/cubemaps/water_back.tga")
+        FileSystemUtils::getAssetFilePath("textures/cubemaps/right.jpg"),
+        FileSystemUtils::getAssetFilePath("textures/cubemaps/left.jpg"),
+        FileSystemUtils::getAssetFilePath("textures/cubemaps/top.jpg"),
+        FileSystemUtils::getAssetFilePath("textures/cubemaps/bottom.jpg"),
+        FileSystemUtils::getAssetFilePath("textures/cubemaps/front.jpg"),
+        FileSystemUtils::getAssetFilePath("textures/cubemaps/back.jpg")
     };
 
     GLuint cubemapTexture = loadCubemap(faces);
@@ -661,8 +763,8 @@ int main() {
     bool renderLightmapOnly = false;  // Set to true to debug the lightmap
 
     // Set specular parameters
-    float specularIntensityValue = 0.65f; // Adjust as needed
-    float shininessValue = 64.0f;        // Higher values for sharper highlights
+    float specularIntensityValue = 0.5f; // Adjust as needed
+    float shininessValue = 32.0f;        // Higher values for sharper highlights
 
     // Set bump strength
     float bumpStrengthValue = 1.0f; // Adjust between 0.0 and 1.0
