@@ -347,7 +347,8 @@ const char* DirectionalLightmapNormalBumpFragmentShader = R"(
         float l0 = max(dot(N, basis0), 0.0);
         float l1 = max(dot(N, basis1), 0.0);
         float l2 = max(dot(N, basis2), 0.0);
-
+        
+        // Compensate for shadowIntensity darkening
         vec3 diffuseLighting = (lm0 * l0 + lm1 * l1 + lm2 * l2) * 2.0;
 
         // Adjusting the diffuse lighting with the dominant direction for better shadow depth
