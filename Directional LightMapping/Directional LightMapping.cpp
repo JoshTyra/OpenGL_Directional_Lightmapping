@@ -41,7 +41,9 @@ float lastFrame = 0.0f; // Time of last frame
 double previousTime = 0.0;
 int frameCount = 0;
 bool useSSBump = true; // Flag to toggle between SSBump and Normal Map shaders
-bool keyPressed = false; // To handle single key press events
+bool lKeyPressed = false;
+bool nKeyPressed = false;
+static bool visualizeNormals = false;
 
 Camera camera(glm::vec3(0.0f, 5.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f), -180.0f, 0.0f, 6.0f, 0.1f, 45.0f, 0.1f, 500.0f);
 
@@ -102,16 +104,40 @@ const char* DirectionalLightmapSSBumpFragment = R"(
     uniform vec3 viewPos;
 
     uniform bool renderLightmapOnly;
+    uniform bool visualizeNormals;
 
     uniform float bumpStrength;
     uniform float specularIntensity;
     uniform float shininess;
+    uniform float specularNormalBias = 0.5;
 
     void main()
     {
         if (renderLightmapOnly) {
             vec3 lm0 = texture(lightmap0, LightmapTexCoords).rgb;
             FragColor = vec4(lm0, 1.0);
+            return;
+        }
+
+        if (visualizeNormals) {
+            vec3 ssbump = texture(ssbumpMap, TexCoords).rgb;
+            ssbump.g = 1.0 - ssbump.g;  // Flip green channel
+            ssbump.b = 1.0 - ssbump.b;  // Flip blue channel
+            ssbump = ssbump * 2.0 - 1.0;
+
+            vec3 finalCoeffs = normalize(vec3(
+                ssbump.x * bumpStrength,
+                ssbump.y * bumpStrength,
+                ssbump.z
+            ));
+
+            vec3 N = normalize(
+                TBN[0] * finalCoeffs.x +
+                TBN[1] * finalCoeffs.y +
+                TBN[2] * finalCoeffs.z
+            );
+
+            FragColor = vec4(N * 0.5 + 0.5, 1.0);
             return;
         }
 
@@ -123,30 +149,42 @@ const char* DirectionalLightmapSSBumpFragment = R"(
         // --- Sample and process SSBUMP map ---
         vec3 ssbump = texture(ssbumpMap, TexCoords).rgb;
         ssbump.g = 1.0 - ssbump.g;  // Flip green channel for DirectX to OpenGL conversion
-        // The Z-flip is only needed for SSBump maps because they work with basis coefficients rather than direct normal vectors.
-        ssbump.b = 1.0 - ssbump.b;
-    
+        ssbump.b = 1.0 - ssbump.b;  // Flip blue channel for SSBump
+
         // Convert from [0,1] to [-1,1] range
         ssbump = ssbump * 2.0 - 1.0;
 
-        // Create default normal coefficients (no bump)
-        vec3 defaultCoeffs = vec3(0.0, 0.0, 1.0);
-    
-        // Blend between default and SSBUMP coefficients based on bump strength
-        vec3 finalCoeffs = normalize(mix(defaultCoeffs, ssbump, bumpStrength));
+        // --- Calculate two normal vectors: one for diffuse and one for specular ---
+        vec3 diffuseCoeffs = normalize(vec3(
+            ssbump.x * bumpStrength,
+            ssbump.y * bumpStrength,
+            ssbump.z
+        ));
 
-        // --- Construct the normal using the blended coefficients ---
-        vec3 N = normalize(
-            basis0 * finalCoeffs.x +
-            basis1 * finalCoeffs.y +
-            basis2 * finalCoeffs.z
+        vec3 specularCoeffs = normalize(vec3(
+            ssbump.x * bumpStrength,
+            ssbump.y * bumpStrength,
+            mix(ssbump.z, 1.0, specularNormalBias)
+        ));
+
+        // --- Construct the normal vectors ---
+        vec3 N_diffuse = normalize(
+            basis0 * diffuseCoeffs.x +
+            basis1 * diffuseCoeffs.y +
+            basis2 * diffuseCoeffs.z
+        );
+
+        vec3 N_specular = normalize(
+            basis0 * specularCoeffs.x +
+            basis1 * specularCoeffs.y +
+            basis2 * specularCoeffs.z
         );
 
         // --- View Vector ---
         vec3 V = normalize(viewPos - FragPos);
 
         // --- Reflection Vector for Environment Map ---
-        vec3 R = reflect(-V, N);
+        vec3 R = reflect(-V, N_specular); // Using specular normal for reflections
         vec3 reflectionColor = texture(environmentMap, R).rgb;
 
         // --- Sample RNM Lightmaps ---
@@ -159,10 +197,10 @@ const char* DirectionalLightmapSSBumpFragment = R"(
         float lum1 = dot(lm1, vec3(0.2126, 0.7152, 0.0722));
         float lum2 = dot(lm2, vec3(0.2126, 0.7152, 0.0722));
 
-        // --- Compute lighting coefficients using the blended normal ---
-        float c0 = max(0.0, dot(N, basis0));
-        float c1 = max(0.0, dot(N, basis1));
-        float c2 = max(0.0, dot(N, basis2));
+        // --- Compute lighting coefficients using the diffuse normal ---
+        float c0 = max(dot(N_diffuse, basis0), 0.0);
+        float c1 = max(dot(N_diffuse, basis1), 0.0);
+        float c2 = max(dot(N_diffuse, basis2), 0.0);
 
         // --- Calculate per-basis lighting contribution ---
         vec3 lighting0 = lm0 * c0;
@@ -179,17 +217,17 @@ const char* DirectionalLightmapSSBumpFragment = R"(
             basis2 * lum2
         );
 
-        // --- Fetch Diffuse Color and Alpha (Specular Mask) ---
-        vec4 albedoWithAlpha = texture(diffuseTexture, TexCoords);
-        vec3 albedo = albedoWithAlpha.rgb;
-        float specularMask = albedoWithAlpha.a;
+        // --- Fetch Diffuse Color and Alpha for Masking ---
+        vec4 albedo = texture(diffuseTexture, TexCoords);
+        vec3 diffuseColor = albedo.rgb;
+        float specularMask = albedo.a;
 
         // --- Calculate Diffuse Component ---
-        vec3 diffuse = albedo * diffuseLighting;
+        vec3 diffuse = diffuseColor * diffuseLighting;
 
-        // --- Specular Lighting Calculation ---
+        // --- Specular Lighting Calculation using specular normal ---
         vec3 H = normalize(V + dominantDir);
-        float NdotH = max(dot(N, H), 0.0);
+        float NdotH = max(dot(N_specular, H), 0.0); // Using specular normal
         float specularFactor = pow(NdotH, shininess);
 
         // Compute irradiance in dominant direction for specular
@@ -206,8 +244,8 @@ const char* DirectionalLightmapSSBumpFragment = R"(
         vec3 specular = lightColor * specularFactor * maskedSpecularIntensity;
 
         // --- Apply Specular Mask to Reflection ---
-        float reflectionIntensity = 0.25;
-        vec3 maskedReflection = reflectionColor * reflectionIntensity * specularMask;
+        float reflectionIntensity = 0.5 * specularMask;
+        vec3 maskedReflection = reflectionColor * reflectionIntensity;
 
         // --- Combine Diffuse, Specular, and Reflection ---
         vec3 finalColor = diffuse + specular + maskedReflection;
@@ -235,6 +273,7 @@ const char* DirectionalLightmapNormalBumpFragmentShader = R"(
     uniform vec3 viewPos;
 
     uniform bool renderLightmapOnly;
+    uniform bool visualizeNormals; // For debugging purposes
 
     uniform float specularIntensity;
     uniform float shininess;
@@ -248,15 +287,35 @@ const char* DirectionalLightmapNormalBumpFragmentShader = R"(
             return;
         }
 
+        if (visualizeNormals) {
+            // Visualize the normal vector as color for debugging
+            vec3 tangentNormal = texture(normalMap, TexCoords).rgb;
+            tangentNormal.g = 1.0 - tangentNormal.g; // Flip Y for DirectX to OpenGL conversion
+            tangentNormal = normalize(tangentNormal * 2.0 - 1.0);
+
+            // Scale the XY components by bumpStrength while keeping Z unchanged
+            tangentNormal.xy *= bumpStrength;
+            tangentNormal = normalize(tangentNormal);
+
+            // Transform to world space
+            vec3 N = normalize(TBN * tangentNormal);
+
+            // Map normals from [-1, 1] to [0, 1] for visualization
+            FragColor = vec4(N * 0.5 + 0.5, 1.0);
+            return;
+        }
+
         // --- Normal Mapping ---
         vec3 tangentNormal = texture(normalMap, TexCoords).rgb;
         tangentNormal.g = 1.0 - tangentNormal.g; // Flip Y for DirectX to OpenGL conversion
         tangentNormal = normalize(tangentNormal * 2.0 - 1.0);
 
-        // Blend between the default normal and the normal map based on bumpStrength
-        vec3 baseNormal = normalize(TBN[2]); // Default normal from TBN matrix
-        vec3 mappedNormal = normalize(TBN * tangentNormal);
-        vec3 N = normalize(mix(baseNormal, mappedNormal, bumpStrength)); // Interpolated normal
+        // Scale the XY components by bumpStrength while keeping Z unchanged
+        tangentNormal.xy *= bumpStrength;
+        tangentNormal = normalize(tangentNormal);
+
+        // Transform to world space
+        vec3 N = normalize(TBN * tangentNormal);
 
         // --- View Vector ---
         vec3 V = normalize(viewPos - FragPos);
@@ -289,7 +348,11 @@ const char* DirectionalLightmapNormalBumpFragmentShader = R"(
         float l1 = max(dot(N, basis1), 0.0);
         float l2 = max(dot(N, basis2), 0.0);
 
-        vec3 diffuseLighting = lm0 * l0 + lm1 * l1 + lm2 * l2;
+        vec3 diffuseLighting = (lm0 * l0 + lm1 * l1 + lm2 * l2) * 2.0;
+
+        // Adjusting the diffuse lighting with the dominant direction for better shadow depth
+        float shadowIntensity = max(dot(N, dominantDir), 0.0); // self-shadowing term
+        diffuseLighting *= shadowIntensity;
 
         // --- Fetch Diffuse Color and Alpha for Masking ---
         vec4 albedo = texture(diffuseTexture, TexCoords);
@@ -300,7 +363,6 @@ const char* DirectionalLightmapNormalBumpFragmentShader = R"(
         vec3 diffuse = diffuseColor * diffuseLighting;
 
         // --- Specular Lighting Calculation ---
-        // Blinn-Phong Specular Model
         vec3 H = normalize(V + dominantDir);
         float NdotH = max(dot(N, H), 0.0);
         float specularFactor = pow(NdotH, shininess);
@@ -310,13 +372,13 @@ const char* DirectionalLightmapNormalBumpFragmentShader = R"(
         float s1 = max(dot(dominantDir, basis1), 0.0);
         float s2 = max(dot(dominantDir, basis2), 0.0);
 
-        vec3 lightColor = lm0 * s0 + lm1 * s1 + lm2 * s2;
+        vec3 lightColor = (lm0 * s0 + lm1 * s1 + lm2 * s2) * shadowIntensity;
 
         // Calculate Specular Component (scaled by mask)
         vec3 specular = lightColor * specularFactor * specularIntensity * mask;
 
         // --- Combine Diffuse, Specular, and Reflection ---
-        float reflectionIntensity = 0.25 * mask; // Reflection intensity scaled by mask
+        float reflectionIntensity = 0.5 * mask; // Reflection intensity scaled by mask
         vec3 finalColor = diffuse + specular + reflectionColor * reflectionIntensity;
 
         FragColor = vec4(finalColor, 1.0);
@@ -324,6 +386,7 @@ const char* DirectionalLightmapNormalBumpFragmentShader = R"(
 )";
 
 void processInput(GLFWwindow* window) {
+    // Handle movement keys
     if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
         camera.processKeyboardInput(GLFW_KEY_W, deltaTime);
     if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
@@ -333,15 +396,24 @@ void processInput(GLFWwindow* window) {
     if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
         camera.processKeyboardInput(GLFW_KEY_D, deltaTime);
 
-    // Toggle shader on 'L' key press
-    if (glfwGetKey(window, GLFW_KEY_L) == GLFW_PRESS && !keyPressed) {
+    // Handle 'L' key toggle with its own flag
+    if (glfwGetKey(window, GLFW_KEY_L) == GLFW_PRESS && !lKeyPressed) {
         useSSBump = !useSSBump;
-        keyPressed = true;
+        lKeyPressed = true;
         std::cout << "Switched to " << (useSSBump ? "SSBump" : "Normal Map") << " shader." << std::endl;
     }
-
     if (glfwGetKey(window, GLFW_KEY_L) == GLFW_RELEASE) {
-        keyPressed = false;
+        lKeyPressed = false;
+    }
+
+    // Handle 'N' key toggle with its own flag
+    if (glfwGetKey(window, GLFW_KEY_N) == GLFW_PRESS && !nKeyPressed) {
+        visualizeNormals = !visualizeNormals;
+        nKeyPressed = true;
+        std::cout << "Visualize Normals: " << (visualizeNormals ? "ON" : "OFF") << std::endl;
+    }
+    if (glfwGetKey(window, GLFW_KEY_N) == GLFW_RELEASE) {
+        nKeyPressed = false;
     }
 }
 
@@ -390,7 +462,7 @@ std::map<std::string, MaterialNormalMaps> materialNormalMapPaths = {
     {"example_tutorial_metal", {"textures/default_bump_SSBump.tga", "textures/default_bump.tga"}},
     {"example_tutorial_metal_floor", {"textures/panels_generic_outdoor_bump_SSBump.png", "textures/panels_generic_outdoor_bump.png"}},
     {"example_tutorial_plate_floor", {"textures/metal plate floor bump_SSBump.png", "textures/metal plate floor bump.tga"}},
-    {"example_tutorial_panels", {"textures/default_bump_SSBump.tga", "textures/default_bump.tga"}},
+    {"example_tutorial_panels", {"textures/panels_generic_outdoor_bump_SSBump.png", "textures/panels_generic_outdoor_bump.png"}},
     {"boulder_grey", {"textures/default_bump_SSBump.tga", "textures/default_bump.tga"}},
     {"example_tutorial_lights_blue", {"textures/default_bump_SSBump.tga", "textures/default_bump.tga"}},
     {"example_tutorial_lights_red", {"textures/default_bump_SSBump.tga", "textures/default_bump.tga"}}
@@ -827,7 +899,7 @@ int main() {
     bool renderLightmapOnly = false;  // Set to true to debug the lightmap
 
     // Set specular parameters
-    float specularIntensityValue = 0.5f; // Adjust as needed
+    float specularIntensityValue = 0.75f; // Adjust as needed
     float shininessValue = 32.0f;        // Higher values for sharper highlights
 
     // Set bump strength
@@ -866,15 +938,6 @@ int main() {
         glUniform1f(glGetUniformLocation(currentShaderProgram, "specularIntensity"), specularIntensityValue);
         glUniform1f(glGetUniformLocation(currentShaderProgram, "shininess"), shininessValue);
 
-        if (!useSSBump)
-        {
-            bumpStrengthValue = 1.25f;
-        }
-        else
-        {
-            bumpStrengthValue = 1.0f;
-        }
-
         glUniform1f(glGetUniformLocation(currentShaderProgram, "bumpStrength"), bumpStrengthValue);
 
         // Set up the RNM lightmaps
@@ -896,6 +959,9 @@ int main() {
 
         // Set the debug flag
         glUniform1i(glGetUniformLocation(currentShaderProgram, "renderLightmapOnly"), renderLightmapOnly);
+
+        // Pass the visualization toggle to the shader
+        glUniform1i(glGetUniformLocation(currentShaderProgram, "visualizeNormals"), visualizeNormals);
 
         // Render all objects
         for (const auto& mesh : meshes) {
