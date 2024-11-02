@@ -43,7 +43,9 @@ int frameCount = 0;
 bool useSSBump = true; // Flag to toggle between SSBump and Normal Map shaders
 bool lKeyPressed = false;
 bool nKeyPressed = false;
+bool iKeyPressed = false;
 static bool visualizeNormals = false;
+static bool visualizeshadowIntensity = false;
 
 Camera camera(glm::vec3(0.0f, 5.0f, 0.0f), glm::vec3(0.0f, 1.0f, 0.0f), -180.0f, 0.0f, 6.0f, 0.1f, 45.0f, 0.1f, 500.0f);
 
@@ -274,6 +276,7 @@ const char* DirectionalLightmapNormalBumpFragmentShader = R"(
 
     uniform bool renderLightmapOnly;
     uniform bool visualizeNormals; // For debugging purposes
+    uniform bool visualizeShadowIntensity; // New debug toggle
 
     uniform float specularIntensity;
     uniform float shininess;
@@ -317,13 +320,6 @@ const char* DirectionalLightmapNormalBumpFragmentShader = R"(
         // Transform to world space
         vec3 N = normalize(TBN * tangentNormal);
 
-        // --- View Vector ---
-        vec3 V = normalize(viewPos - FragPos);
-
-        // --- Reflection Vector for Environment Map ---
-        vec3 R = reflect(-V, N);
-        vec3 reflectionColor = texture(environmentMap, R).rgb;
-
         // --- Sample RNM Lightmaps ---
         vec3 lm0 = texture(lightmap0, LightmapTexCoords).rgb;
         vec3 lm1 = texture(lightmap1, LightmapTexCoords).rgb;
@@ -347,12 +343,18 @@ const char* DirectionalLightmapNormalBumpFragmentShader = R"(
         float l0 = max(dot(N, basis0), 0.0);
         float l1 = max(dot(N, basis1), 0.0);
         float l2 = max(dot(N, basis2), 0.0);
-        
-        // Compensate for shadowIntensity darkening
+
         vec3 diffuseLighting = (lm0 * l0 + lm1 * l1 + lm2 * l2) * 2.0;
 
         // Adjusting the diffuse lighting with the dominant direction for better shadow depth
         float shadowIntensity = max(dot(N, dominantDir), 0.0); // self-shadowing term
+
+        if (visualizeShadowIntensity) {
+            // Visualize shadowIntensity as grayscale
+            FragColor = vec4(vec3(shadowIntensity), 1.0);
+            return;
+        }
+
         diffuseLighting *= shadowIntensity;
 
         // --- Fetch Diffuse Color and Alpha for Masking ---
@@ -364,7 +366,7 @@ const char* DirectionalLightmapNormalBumpFragmentShader = R"(
         vec3 diffuse = diffuseColor * diffuseLighting;
 
         // --- Specular Lighting Calculation ---
-        vec3 H = normalize(V + dominantDir);
+        vec3 H = normalize(viewPos - FragPos + dominantDir);
         float NdotH = max(dot(N, H), 0.0);
         float specularFactor = pow(NdotH, shininess);
 
@@ -380,7 +382,7 @@ const char* DirectionalLightmapNormalBumpFragmentShader = R"(
 
         // --- Combine Diffuse, Specular, and Reflection ---
         float reflectionIntensity = 0.5 * mask; // Reflection intensity scaled by mask
-        vec3 finalColor = diffuse + specular + reflectionColor * reflectionIntensity;
+        vec3 finalColor = diffuse + specular + texture(environmentMap, reflect(-(viewPos - FragPos), N)).rgb * reflectionIntensity;
 
         FragColor = vec4(finalColor, 1.0);
     }
@@ -415,6 +417,16 @@ void processInput(GLFWwindow* window) {
     }
     if (glfwGetKey(window, GLFW_KEY_N) == GLFW_RELEASE) {
         nKeyPressed = false;
+    }
+
+    // Handle 'I' key toggle with its own flag
+    if (glfwGetKey(window, GLFW_KEY_I) == GLFW_PRESS && !iKeyPressed) {
+        visualizeshadowIntensity = !visualizeshadowIntensity;
+        iKeyPressed = true;
+        std::cout << "Visualize Shadow Intensity: " << (visualizeshadowIntensity ? "ON" : "OFF") << std::endl;
+    }
+    if (glfwGetKey(window, GLFW_KEY_I) == GLFW_RELEASE) {
+        iKeyPressed = false;
     }
 }
 
@@ -963,6 +975,9 @@ int main() {
 
         // Pass the visualization toggle to the shader
         glUniform1i(glGetUniformLocation(currentShaderProgram, "visualizeNormals"), visualizeNormals);
+
+        // Pass the visualization toggle to the shader
+        glUniform1i(glGetUniformLocation(currentShaderProgram, "visualizeShadowIntensity"), visualizeshadowIntensity);
 
         // Render all objects
         for (const auto& mesh : meshes) {
