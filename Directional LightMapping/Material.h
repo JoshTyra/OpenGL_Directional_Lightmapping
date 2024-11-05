@@ -10,14 +10,13 @@
 #include "tinyxml2.h"
 #include "Camera.h"
 
-class Texture {
-public:
+struct Texture {
     GLuint id;
+    GLint unit;
     std::string type;
-    std::string path;                // For 2D textures
-    std::vector<std::string> faces;  // For cubemap faces
-    GLuint unit;
+    std::string path;
     bool isCubemap;
+    glm::vec2 tiling = glm::vec2(1.0f); // Default tiling factors (U and V)
 };
 
 class Material {

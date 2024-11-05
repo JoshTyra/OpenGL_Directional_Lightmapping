@@ -15,11 +15,12 @@ std::map<std::string, GLuint> Material::textureCache;
 // Initialize the static sampler unit mapping
 const std::unordered_map<std::string, GLint> Material::samplerUnitMap = {
     {"diffuseTexture", 0},
-    {"ssbumpMap", 1},
+    {"bumpMap", 1},
     {"lightmap0", 2},
     {"lightmap1", 3},
     {"lightmap2", 4},
-    {"environmentMap", 5}
+    {"environmentMap", 5},
+    {"detailMap", 6}
 };
 
 Material::Material(const std::string& xmlFilePath) {
@@ -56,6 +57,17 @@ Material::Material(const std::string& xmlFilePath) {
                 texture.path = FileSystemUtils::getAssetFilePath(texElement->Attribute("path"));
                 texture.isCubemap = false;
 
+                // Parse tiling if present
+                tinyxml2::XMLElement* tilingElement = texElement->FirstChildElement("tiling");
+                if (tilingElement) {
+                    float u = tilingElement->FloatAttribute("u", 1.0f);
+                    float v = tilingElement->FloatAttribute("v", 1.0f);
+                    texture.tiling = glm::vec2(u, v);
+                }
+                else {
+                    texture.tiling = glm::vec2(1.0f);
+                }
+
                 // Check if the texture is already loaded
                 auto it = textureCache.find(texture.path);
                 if (it != textureCache.end()) {
@@ -74,6 +86,7 @@ Material::Material(const std::string& xmlFilePath) {
                 texture.unit = texElement->IntAttribute("unit");
                 texture.type = texElement->Attribute("type");
                 texture.isCubemap = true;
+                texture.tiling = glm::vec2(1.0f); // Default tiling for cubemaps
 
                 // Load cubemap faces
                 std::vector<std::string> faces;
@@ -184,6 +197,33 @@ void Material::loadShaders() {
         }
     }
 
+    // Determine if detail map is used
+    bool hasDetailMap = false;
+    for (const auto& texture : textures) {
+        if (texture.type == "detailMap") {
+            hasDetailMap = true;
+            break;
+        }
+    }
+
+    // Inject preprocessor directive if detail map is used
+    if (hasDetailMap) {
+        // Find the position of '#version' directive
+        size_t versionPos = fragmentCode.find("#version");
+        if (versionPos != std::string::npos) {
+            size_t versionEnd = fragmentCode.find('\n', versionPos);
+            if (versionEnd != std::string::npos) {
+                fragmentCode.insert(versionEnd + 1, "#define USE_DETAIL_MAP\n");
+            }
+            else {
+                fragmentCode += "\n#define USE_DETAIL_MAP\n";
+            }
+        }
+        else {
+            fragmentCode = "#version 430 core\n#define USE_DETAIL_MAP\n" + fragmentCode;
+        }
+    }
+
     // **Debug Output**
     //std::cout << "Modified Fragment Shader Code for Material: " << name << std::endl;
     //std::cout << fragmentCode << std::endl;
@@ -226,6 +266,28 @@ void Material::apply(const glm::mat4& modelMatrix, const Camera& camera, float a
         GLint loc = glGetUniformLocation(shaderProgram, samplerName.c_str());
         if (loc != -1) {
             glUniform1i(loc, unit);
+        }
+    }
+
+    // Pass tiling parameters
+    for (const auto& texture : textures) {
+        // Construct the uniform name (e.g., "diffuseTextureTiling")
+        std::string uniformName = texture.type + "Tiling";
+        GLint loc = glGetUniformLocation(shaderProgram, uniformName.c_str());
+        if (loc != -1) {
+            glUniform2fv(loc, 1, glm::value_ptr(texture.tiling));
+        }
+    }
+
+    // Pass detailBlendFactor if it exists
+    GLint blendFactorLoc = glGetUniformLocation(shaderProgram, "detailBlendFactor");
+    if (blendFactorLoc != -1) {
+        auto it = floatParams.find("detailBlendFactor");
+        if (it != floatParams.end()) {
+            glUniform1f(blendFactorLoc, it->second);
+        }
+        else {
+            glUniform1f(blendFactorLoc, 0.0f); // Default to 0 if not specified
         }
     }
 }
