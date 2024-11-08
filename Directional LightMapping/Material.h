@@ -26,6 +26,12 @@ public:
     std::string vertexShaderPath;
     std::string fragmentShaderPath;
 
+    // Blending parameters
+    bool blendingEnabled = false;
+    GLenum srcBlendFactor = GL_ONE;
+    GLenum dstBlendFactor = GL_ZERO;
+    GLenum blendEquation = GL_FUNC_ADD;
+
     std::map<std::string, float> floatParams;
     std::map<std::string, int> intParams;
     std::map<std::string, glm::vec3> vec3Params;
@@ -46,6 +52,8 @@ private:
     void loadTextures();
     void setUniforms(GLuint program) const;
     static std::map<std::string, GLuint> textureCache;
+    GLenum parseBlendFactor(const std::string& factor);
+    GLenum parseBlendEquation(const std::string& equation);
 };
 
 #endif

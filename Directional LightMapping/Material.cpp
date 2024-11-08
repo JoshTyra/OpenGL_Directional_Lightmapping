@@ -20,8 +20,24 @@ const std::unordered_map<std::string, GLint> Material::samplerUnitMap = {
     {"lightmap1", 3},
     {"lightmap2", 4},
     {"environmentMap", 5},
-    {"detailMap", 6}
+    {"detailMap", 6},
+    {"detailMap2", 7},
+    {"detailMap3", 8},
+    {"blendMap", 9}
 };
+
+GLenum Material::parseBlendFactor(const std::string& factor) {
+    if (factor == "GL_ZERO") return GL_ZERO;
+    if (factor == "GL_ONE") return GL_ONE;
+    if (factor == "GL_SRC_ALPHA") return GL_SRC_ALPHA;
+    return GL_ONE; // Default
+}
+
+GLenum Material::parseBlendEquation(const std::string& equation) {
+    if (equation == "GL_FUNC_ADD") return GL_FUNC_ADD;
+    if (equation == "GL_FUNC_SUBTRACT") return GL_FUNC_SUBTRACT;
+    return GL_FUNC_ADD; // Default
+}
 
 Material::Material(const std::string& xmlFilePath) {
     // Parse XML and load material properties
@@ -141,6 +157,21 @@ Material::Material(const std::string& xmlFilePath) {
         }
     }
 
+    tinyxml2::XMLElement* blendingElement = root->FirstChildElement("blending");
+    if (blendingElement) {
+        blendingEnabled = blendingElement->BoolAttribute("enabled", false);
+        const char* srcFactorStr = blendingElement->Attribute("srcFactor");
+        const char* dstFactorStr = blendingElement->Attribute("dstFactor");
+        const char* equationStr = blendingElement->Attribute("equation");
+
+        if (srcFactorStr)
+            srcBlendFactor = parseBlendFactor(srcFactorStr);
+        if (dstFactorStr)
+            dstBlendFactor = parseBlendFactor(dstFactorStr);
+        if (equationStr)
+            blendEquation = parseBlendEquation(equationStr);
+    }
+
     // Load shaders
     tinyxml2::XMLElement* shaderElement = root->FirstChildElement("shader");
     if (shaderElement) {
@@ -166,68 +197,6 @@ void Material::loadShaders() {
     fShaderStream << fShaderFile.rdbuf();
     std::string fragmentCode = fShaderStream.str();
 
-    // Determine if cubemap is used
-    bool hasCubemap = false;
-    for (const auto& texture : textures) {
-        if (texture.type == "environmentMap") {
-            hasCubemap = true;
-            break;
-        }
-    }
-
-    // Inject preprocessor directive if cubemap is used
-    if (hasCubemap) {
-        // Find the position of '#version' directive
-        size_t versionPos = fragmentCode.find("#version");
-        if (versionPos != std::string::npos) {
-            // Find the end of the line containing '#version'
-            size_t versionEnd = fragmentCode.find('\n', versionPos);
-            if (versionEnd != std::string::npos) {
-                // Insert the directive after the '#version' line
-                fragmentCode.insert(versionEnd + 1, "#define USE_CUBEMAP\n");
-            }
-            else {
-                // Append if no newline found (unlikely)
-                fragmentCode += "\n#define USE_CUBEMAP\n";
-            }
-        }
-        else {
-            // Handle missing '#version' directive if necessary
-            fragmentCode = "#version 430 core\n#define USE_CUBEMAP\n" + fragmentCode;
-        }
-    }
-
-    // Determine if detail map is used
-    bool hasDetailMap = false;
-    for (const auto& texture : textures) {
-        if (texture.type == "detailMap") {
-            hasDetailMap = true;
-            break;
-        }
-    }
-
-    // Inject preprocessor directive if detail map is used
-    if (hasDetailMap) {
-        // Find the position of '#version' directive
-        size_t versionPos = fragmentCode.find("#version");
-        if (versionPos != std::string::npos) {
-            size_t versionEnd = fragmentCode.find('\n', versionPos);
-            if (versionEnd != std::string::npos) {
-                fragmentCode.insert(versionEnd + 1, "#define USE_DETAIL_MAP\n");
-            }
-            else {
-                fragmentCode += "\n#define USE_DETAIL_MAP\n";
-            }
-        }
-        else {
-            fragmentCode = "#version 430 core\n#define USE_DETAIL_MAP\n" + fragmentCode;
-        }
-    }
-
-    // **Debug Output**
-    //std::cout << "Modified Fragment Shader Code for Material: " << name << std::endl;
-    //std::cout << fragmentCode << std::endl;
-
     shaderProgram = compileShader(vertexCode.c_str(), fragmentCode.c_str(), name);
 }
 
@@ -241,7 +210,7 @@ void Material::apply(const glm::mat4& modelMatrix, const Camera& camera, float a
 
     glUniformMatrix4fv(modelLoc, 1, GL_FALSE, glm::value_ptr(modelMatrix));
     glUniformMatrix4fv(viewLoc, 1, GL_FALSE, glm::value_ptr(camera.getViewMatrix()));
-    glUniformMatrix4fv(projLoc, 1, GL_FALSE, glm::value_ptr(camera.getProjectionMatrix(aspectRatio)));
+    glUniformMatrix4fv(projLoc, 1, GL_FALSE,  glm::value_ptr(camera.getProjectionMatrix(aspectRatio)));
 
     // Set camera position
     GLint viewPosLoc = glGetUniformLocation(shaderProgram, "viewPos");
@@ -289,6 +258,16 @@ void Material::apply(const glm::mat4& modelMatrix, const Camera& camera, float a
         else {
             glUniform1f(blendFactorLoc, 0.0f); // Default to 0 if not specified
         }
+    }
+
+    // Set blending mode
+    if (blendingEnabled) {
+        glEnable(GL_BLEND);
+        glBlendFunc(srcBlendFactor, dstBlendFactor);
+        glBlendEquation(blendEquation);
+    }
+    else {
+        glDisable(GL_BLEND);
     }
 }
 
